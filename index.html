@@ -1,0 +1,1514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Hero's Gambit</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+
+<!-- ═══════════════════════════════════════════════
+     FIREBASE SDK — uncomment and configure to enable
+     Firebase online mode (alternative to PeerJS).
+     Replace the config values with your project's.
+     See: https://console.firebase.google.com
+  ═══════════════════════════════════════════════ -->
+<!--
+<script type="module">
+  import { initializeApp }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  const firebaseConfig = {
+    apiKey:            "YOUR_API_KEY",
+    authDomain:        "YOUR_PROJECT.firebaseapp.com",
+    databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+    projectId:         "YOUR_PROJECT",
+    storageBucket:     "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId:             "YOUR_APP_ID"
+  };
+  const app = initializeApp(firebaseConfig);
+  window._firebaseDB = getDatabase(app);
+  window._firebaseRef = ref;
+  window._firebaseSet = set;
+  window._firebaseOnValue = onValue;
+
+// ═══════════════════════════════════════════════════════
+//  ONLINE MODE — PeerJS
+// ═══════════════════════════════════════════════════════
+let peer = null;
+let conn = null;
+let onlineRole = null; // 'host' | 'guest'
+
+function lobbyStatus(msg, color) {
+  const el = document.getElementById('lobby-status');
+  if(el){ el.textContent = msg; el.style.color = color || '#806840'; }
+}
+
+function hostGame() {
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.remove('show');
+  lobbyStatus('Connecting to PeerJS server…');
+  if(peer) peer.destroy();
+  peer = new Peer();
+  peer.on('open', id => {
+    onlineRole = 'host';
+    const url = `${location.origin}${location.pathname}#${id}`;
+    document.getElementById('invite-link').textContent = url;
+    document.getElementById('invite-box').classList.add('show');
+    lobbyStatus('Waiting for your opponent to join…', '#4a9fd4');
+  });
+  peer.on('connection', c => {
+    conn = c;
+    setupConn();
+    lobbyStatus('Opponent connected! Starting…', '#6abce8');
+    setTimeout(() => {
+      gameMode = 'online';
+      startGame();
+      sendState();
+    }, 600);
+  });
+  peer.on('error', e => lobbyStatus('Connection error: ' + e.type, '#e05050'));
+}
+
+function showJoinRow() {
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.add('show');
+  // Auto-fill if URL has a hash
+  const hash = location.hash.replace('#','');
+  if(hash) {
+    // Could be full URL or just ID
+    const id = hash.includes('#') ? hash.split('#').pop() : hash;
+    document.getElementById('join-input').value = id;
+  }
+}
+
+function joinGame() {
+  let raw = document.getElementById('join-input').value.trim();
+  // Accept full URL or bare peer ID
+  if(raw.includes('#')) raw = raw.split('#').pop();
+  if(!raw){ lobbyStatus('Enter a room code or invite link.', '#e05050'); return; }
+  lobbyStatus('Connecting to host…');
+  if(peer) peer.destroy();
+  peer = new Peer();
+  peer.on('open', () => {
+    conn = peer.connect(raw, {reliable:true});
+    setupConn();
+  });
+  peer.on('error', e => lobbyStatus('Could not connect: ' + e.type, '#e05050'));
+}
+
+function setupConn() {
+  conn.on('open', () => {
+    if(!onlineRole) {
+      onlineRole = 'guest';
+      lobbyStatus('Connected! Waiting for host to start…', '#4a9fd4');
+    }
+  });
+  conn.on('data', data => {
+    if(data.type === 'state') {
+      board = data.board;
+      currentPlayer = data.currentPlayer;
+      selected=null; validMoves=[]; validAttacks=[];
+      render();
+      const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                     (onlineRole==='guest' && currentPlayer===2);
+      setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+      if(data.started && gameMode !== 'online') {
+        gameMode = 'online';
+        document.getElementById('mode-screen').style.display = 'none';
+        document.getElementById('game-screen').classList.add('show');
+        resetOnline(data.board, data.currentPlayer);
+      }
+    }
+    if(data.type === 'gameover') {
+      endGame(data.winner);
+    }
+  });
+  conn.on('close', () => setStatus('Opponent disconnected.'));
+}
+
+function sendState(extra) {
+  if(!conn || !conn.open) return;
+  conn.send({ type:'state', board, currentPlayer, started:true, ...extra });
+}
+
+function resetOnline(brd, cp) {
+  if(brd) board = brd;
+  currentPlayer = cp || 1;
+  selected=null; validMoves=[]; validAttacks=[]; promoSquare=null; aiLock=false;
+  document.getElementById('ai-thinking').classList.remove('show');
+  if(!brd) initBoard();
+  clearInfo();
+  const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                 (onlineRole==='guest' && currentPlayer===2);
+  setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+  // Guest is P2 (Crimson Host), Host is P1
+  if(onlineRole==='guest') {
+    document.getElementById('bar2-label').textContent = 'YOU';
+    document.getElementById('bar1').querySelector('.p-label').textContent = 'OPPONENT';
+  }
+  render();
+}
+
+function copyInvite() {
+  const txt = document.getElementById('invite-link').textContent;
+  navigator.clipboard.writeText(txt).then(()=>{
+    document.getElementById('copy-btn').textContent = 'Copied!';
+    setTimeout(()=> document.getElementById('copy-btn').textContent = 'Copy Link', 2000);
+  });
+}
+
+// Auto-join if URL has a peer hash
+window.addEventListener('load', () => {
+  const hash = location.hash.replace('#','');
+  if(hash && !hash.includes('/')) {
+    selectMode('online');
+    document.getElementById('join-input') && (document.getElementById('join-input').value = hash);
+    showJoinRow();
+  }
+});
+
+</script>
+-->
+
+<!-- PeerJS — peer-to-peer online play (no server required) -->
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js">
+// ═══════════════════════════════════════════════════════
+//  ONLINE MODE — PeerJS
+// ═══════════════════════════════════════════════════════
+let peer = null;
+let conn = null;
+let onlineRole = null; // 'host' | 'guest'
+
+function lobbyStatus(msg, color) {
+  const el = document.getElementById('lobby-status');
+  if(el){ el.textContent = msg; el.style.color = color || '#806840'; }
+}
+
+function hostGame() {
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.remove('show');
+  lobbyStatus('Connecting to PeerJS server…');
+  if(peer) peer.destroy();
+  peer = new Peer();
+  peer.on('open', id => {
+    onlineRole = 'host';
+    const url = `${location.origin}${location.pathname}#${id}`;
+    document.getElementById('invite-link').textContent = url;
+    document.getElementById('invite-box').classList.add('show');
+    lobbyStatus('Waiting for your opponent to join…', '#4a9fd4');
+  });
+  peer.on('connection', c => {
+    conn = c;
+    setupConn();
+    lobbyStatus('Opponent connected! Starting…', '#6abce8');
+    setTimeout(() => {
+      gameMode = 'online';
+      startGame();
+      sendState();
+    }, 600);
+  });
+  peer.on('error', e => lobbyStatus('Connection error: ' + e.type, '#e05050'));
+}
+
+function showJoinRow() {
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.add('show');
+  // Auto-fill if URL has a hash
+  const hash = location.hash.replace('#','');
+  if(hash) {
+    // Could be full URL or just ID
+    const id = hash.includes('#') ? hash.split('#').pop() : hash;
+    document.getElementById('join-input').value = id;
+  }
+}
+
+function joinGame() {
+  let raw = document.getElementById('join-input').value.trim();
+  // Accept full URL or bare peer ID
+  if(raw.includes('#')) raw = raw.split('#').pop();
+  if(!raw){ lobbyStatus('Enter a room code or invite link.', '#e05050'); return; }
+  lobbyStatus('Connecting to host…');
+  if(peer) peer.destroy();
+  peer = new Peer();
+  peer.on('open', () => {
+    conn = peer.connect(raw, {reliable:true});
+    setupConn();
+  });
+  peer.on('error', e => lobbyStatus('Could not connect: ' + e.type, '#e05050'));
+}
+
+function setupConn() {
+  conn.on('open', () => {
+    if(!onlineRole) {
+      onlineRole = 'guest';
+      lobbyStatus('Connected! Waiting for host to start…', '#4a9fd4');
+    }
+  });
+  conn.on('data', data => {
+    if(data.type === 'state') {
+      board = data.board;
+      currentPlayer = data.currentPlayer;
+      selected=null; validMoves=[]; validAttacks=[];
+      render();
+      const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                     (onlineRole==='guest' && currentPlayer===2);
+      setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+      if(data.started && gameMode !== 'online') {
+        gameMode = 'online';
+        document.getElementById('mode-screen').style.display = 'none';
+        document.getElementById('game-screen').classList.add('show');
+        resetOnline(data.board, data.currentPlayer);
+      }
+    }
+    if(data.type === 'gameover') {
+      endGame(data.winner);
+    }
+  });
+  conn.on('close', () => setStatus('Opponent disconnected.'));
+}
+
+function sendState(extra) {
+  if(!conn || !conn.open) return;
+  conn.send({ type:'state', board, currentPlayer, started:true, ...extra });
+}
+
+function resetOnline(brd, cp) {
+  if(brd) board = brd;
+  currentPlayer = cp || 1;
+  selected=null; validMoves=[]; validAttacks=[]; promoSquare=null; aiLock=false;
+  document.getElementById('ai-thinking').classList.remove('show');
+  if(!brd) initBoard();
+  clearInfo();
+  const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                 (onlineRole==='guest' && currentPlayer===2);
+  setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+  // Guest is P2 (Crimson Host), Host is P1
+  if(onlineRole==='guest') {
+    document.getElementById('bar2-label').textContent = 'YOU';
+    document.getElementById('bar1').querySelector('.p-label').textContent = 'OPPONENT';
+  }
+  render();
+}
+
+function copyInvite() {
+  const txt = document.getElementById('invite-link').textContent;
+  navigator.clipboard.writeText(txt).then(()=>{
+    document.getElementById('copy-btn').textContent = 'Copied!';
+    setTimeout(()=> document.getElementById('copy-btn').textContent = 'Copy Link', 2000);
+  });
+}
+
+// Auto-join if URL has a peer hash
+window.addEventListener('load', () => {
+  const hash = location.hash.replace('#','');
+  if(hash && !hash.includes('/')) {
+    selectMode('online');
+    document.getElementById('join-input') && (document.getElementById('join-input').value = hash);
+    showJoinRow();
+  }
+});
+
+</script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #0d0a07;
+  --sq-dark:     #2a1a0a;
+  --sq-light:    #c8a046;
+  --gold:        #c8a96e;
+  --gold-bright: #f0cc7a;
+  --parchment:   #e8d5a3;
+  --glow-blue:   #4a9fd4;
+  --glow-red:    #e05050;
+  --board-size:  min(96vw, 520px);
+  --sq:          calc(var(--board-size) / 8);
+}
+
+html, body {
+  width:100%; height:100%;
+  background: var(--bg);
+  color: var(--parchment);
+  font-family: 'Crimson Text', serif;
+  overflow-x: hidden;
+  touch-action: manipulation;
+}
+
+/* ── MODE SELECT SCREEN ── */
+#mode-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  gap: 24px;
+  padding: 30px 20px;
+}
+#mode-screen h1 {
+  font-family: 'Cinzel', serif;
+  font-weight: 900;
+  font-size: clamp(2rem, 8vw, 3rem);
+  letter-spacing: 0.08em;
+  background: linear-gradient(180deg, #f0cc7a 0%, #c8a046 50%, #8b6914 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-align: center;
+  line-height: 1.1;
+}
+#mode-screen .tagline {
+  font-style: italic;
+  color: #a08850;
+  letter-spacing: 0.15em;
+  font-size: 0.9rem;
+  text-align: center;
+}
+.mode-divider {
+  font-family: 'Cinzel', serif;
+  font-size: 0.72rem;
+  letter-spacing: 0.2em;
+  color: #5a3a10;
+  text-align: center;
+}
+.mode-btn {
+  font-family: 'Cinzel', serif;
+  font-size: 1rem;
+  letter-spacing: 0.08em;
+  padding: 14px 40px;
+  background: linear-gradient(180deg, #2a1a08 0%, #160e04 100%);
+  border: 1px solid #5a3a10;
+  border-radius: 4px;
+  color: var(--gold-bright);
+  cursor: pointer;
+  width: 240px;
+  text-align: center;
+  transition: all 0.2s;
+  position: relative;
+}
+.mode-btn:active, .mode-btn.sel {
+  border-color: var(--gold);
+  box-shadow: 0 0 14px rgba(240,204,122,0.25);
+  background: linear-gradient(180deg, #3a2510 0%, #1e1208 100%);
+}
+.mode-btn .sub {
+  display: block;
+  font-family: 'Crimson Text', serif;
+  font-style: italic;
+  font-size: 0.75rem;
+  color: #806840;
+  margin-top: 3px;
+  letter-spacing: 0.05em;
+}
+
+/* Difficulty row */
+#diff-row {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+#diff-row.show { display: flex; }
+#diff-row .diff-label {
+  font-family: 'Cinzel', serif;
+  font-size: 0.75rem;
+  color: #a08850;
+  letter-spacing: 0.15em;
+}
+#diff-btns {
+  display: flex;
+  gap: 8px;
+}
+.diff-btn {
+  font-family: 'Cinzel', serif;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  padding: 8px 16px;
+  background: #160e04;
+  border: 1px solid #3a2510;
+  border-radius: 3px;
+  color: #a08850;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.diff-btn.sel, .diff-btn:active {
+  border-color: var(--gold);
+  color: var(--gold-bright);
+  background: #2a1a08;
+}
+
+#start-btn {
+  display: none;
+  font-family: 'Cinzel', serif;
+  font-size: 0.95rem;
+  letter-spacing: 0.1em;
+  padding: 13px 44px;
+  background: linear-gradient(180deg, #5a3a10 0%, #2a1a05 100%);
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  color: var(--gold-bright);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 4px;
+}
+#start-btn.show { display: block; }
+#start-btn:active { transform: scale(0.97); }
+
+/* ── ONLINE LOBBY ── */
+#online-lobby { display:none; flex-direction:column; align-items:center; gap:14px; width:280px; }
+#online-lobby.show { display:flex; }
+#online-lobby .lobby-label { font-family:'Cinzel',serif; font-size:0.72rem; letter-spacing:0.18em; color:#a08850; text-align:center; }
+.lobby-btn { font-family:'Cinzel',serif; font-size:0.82rem; letter-spacing:0.06em; padding:10px 0; width:100%; background:#160e04; border:1px solid #3a2510; border-radius:3px; color:var(--gold); cursor:pointer; transition:all 0.2s; text-align:center; }
+.lobby-btn:active { border-color:var(--gold); background:#2a1a08; }
+#lobby-status { font-family:'Crimson Text',serif; font-style:italic; font-size:0.82rem; color:#806840; text-align:center; min-height:18px; }
+#invite-box { display:none; flex-direction:column; align-items:center; gap:8px; width:100%; }
+#invite-box.show { display:flex; }
+#invite-link { font-family:'Crimson Text',serif; font-size:0.75rem; color:var(--glow-blue); word-break:break-all; text-align:center; background:#0a1520; border:1px solid #1a3a5c; border-radius:3px; padding:8px 10px; width:100%; cursor:pointer; }
+#copy-btn { font-family:'Cinzel',serif; font-size:0.7rem; letter-spacing:0.08em; padding:6px 18px; background:#0a1520; border:1px solid #1a3a5c; border-radius:3px; color:var(--glow-blue); cursor:pointer; }
+#join-row { display:none; flex-direction:column; align-items:center; gap:8px; width:100%; }
+#join-row.show { display:flex; }
+#join-input { font-family:'Crimson Text',serif; font-size:0.9rem; padding:8px 12px; width:100%; background:#0d0a07; border:1px solid #3a2510; border-radius:3px; color:var(--parchment); text-align:center; letter-spacing:0.12em; outline:none; }
+#join-input:focus { border-color:var(--gold); }
+#join-input::placeholder { color:#5a3a20; }
+#online-indicator { display:none; width:8px; height:8px; border-radius:50%; background:var(--glow-blue); box-shadow:0 0 6px var(--glow-blue); }
+#online-indicator.show { display:inline-block; }
+
+/* ── GAME SCREEN ── */
+#game-screen { display: none; }
+#game-screen.show {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 10px 8px 20px;
+  gap: 8px;
+}
+
+#title-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: var(--board-size);
+  padding: 4px 0;
+}
+#title-bar h1 {
+  font-family: 'Cinzel', serif;
+  font-weight: 900;
+  font-size: clamp(1.2rem, 5vw, 1.8rem);
+  letter-spacing: 0.08em;
+  background: linear-gradient(180deg, #f0cc7a 0%, #c8a046 50%, #8b6914 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.1;
+}
+#menu-btn {
+  font-family: 'Cinzel', serif;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  padding: 5px 10px;
+  background: #160e04;
+  border: 1px solid #3a2510;
+  border-radius: 3px;
+  color: #806840;
+  cursor: pointer;
+}
+
+/* Player bars */
+.player-bar {
+  width: var(--board-size);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  border-radius: 4px;
+  font-family: 'Cinzel', serif;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  border: 1px solid #3a2a10;
+  transition: all 0.3s;
+}
+.player-bar.p1 { background: linear-gradient(90deg,#0a1f35,#0d0a07); border-color:#1a3a5c; }
+.player-bar.p2 { background: linear-gradient(90deg,#0d0a07,#350a0a); border-color:#5c1a1a; }
+.player-bar.active-bar { box-shadow: 0 0 12px rgba(240,204,122,0.3); border-color: var(--gold); }
+.player-bar .p-name { font-weight:700; font-size:0.85rem; }
+.player-bar.p1 .p-name { color: var(--glow-blue); }
+.player-bar.p2 .p-name { color: var(--glow-red); }
+.player-bar .p-label { color:#a08850; font-size:0.65rem; }
+.turn-gem { width:9px; height:9px; border-radius:50%; opacity:0.3; transition:all 0.3s; }
+.player-bar.active-bar .turn-gem { opacity:1; box-shadow:0 0 8px currentColor; }
+.player-bar.p1 .turn-gem { background:var(--glow-blue); color:var(--glow-blue); }
+.player-bar.p2 .turn-gem { background:var(--glow-red); color:var(--glow-red); }
+
+/* Board */
+#table-wrap {
+  position: relative;
+  width: calc(var(--board-size) + 36px);
+  display: flex;
+  justify-content: center;
+}
+#board-frame {
+  position: relative;
+  background: #1a0f05;
+  border: 3px solid #3a2510;
+  border-radius: 6px;
+  padding: 14px;
+  box-shadow: 0 0 0 1px #5a3a10, 0 0 30px rgba(0,0,0,0.8), inset 0 0 20px rgba(0,0,0,0.5);
+}
+#board-frame::before { content:'✦'; position:absolute; top:4px; left:6px; font-size:12px; color:#5a3a10; }
+#board-frame::after  { content:'✦'; position:absolute; top:4px; right:6px; font-size:12px; color:#5a3a10; }
+#board-frame .rune-bl { content:'✦'; position:absolute; bottom:4px; left:6px; font-size:12px; color:#5a3a10; }
+#board-frame .rune-br { content:'✦'; position:absolute; bottom:4px; right:6px; font-size:12px; color:#5a3a10; }
+
+#board {
+  display: grid;
+  grid-template-columns: repeat(8, var(--sq));
+  grid-template-rows: repeat(8, var(--sq));
+  width: var(--board-size);
+  height: var(--board-size);
+  border: 2px solid #5a3a10;
+  transform: perspective(900px) rotateX(8deg);
+  transform-origin: center center;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.7);
+}
+
+.sq {
+  width:var(--sq); height:var(--sq);
+  display:flex; align-items:center; justify-content:center;
+  position:relative; cursor:pointer;
+  transition:background 0.12s;
+  user-select:none; -webkit-user-select:none;
+}
+.sq.light { background: var(--sq-light); }
+.sq.dark  { background: var(--sq-dark); }
+.sq.light::after {
+  content:''; position:absolute; inset:0;
+  background: linear-gradient(135deg,rgba(255,255,255,0.06) 0%,transparent 60%);
+  pointer-events:none;
+}
+.sq.selected  { background:rgba(74,159,212,0.55)!important; box-shadow:inset 0 0 0 2px var(--glow-blue); }
+.sq.can-move  { background:rgba(240,204,122,0.22)!important; }
+.sq.can-move::before {
+  content:''; position:absolute; width:30%; height:30%; border-radius:50%;
+  background:rgba(240,204,122,0.6); box-shadow:0 0 8px rgba(240,204,122,0.5); z-index:1;
+}
+.sq.can-attack { background:rgba(224,80,80,0.35)!important; box-shadow:inset 0 0 0 2px var(--glow-red); }
+
+.piece {
+  width:82%; height:82%;
+  display:flex; align-items:center; justify-content:center;
+  position:relative; z-index:2;
+  filter: drop-shadow(0 3px 4px rgba(0,0,0,0.8));
+  transition: transform 0.15s;
+}
+.piece:active { transform:scale(0.92); }
+.piece svg { width:100%; height:100%; }
+
+/* AI thinking overlay on board */
+#ai-thinking {
+  display: none;
+  position: absolute;
+  inset: 0;
+  background: rgba(10,5,2,0.55);
+  z-index: 10;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+#ai-thinking.show { display: flex; }
+#ai-thinking span {
+  font-family: 'Cinzel', serif;
+  font-size: 0.8rem;
+  color: var(--glow-red);
+  letter-spacing: 0.15em;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+
+/* Status + Info */
+#status-banner {
+  width: var(--board-size);
+  text-align: center;
+  font-family: 'Cinzel', serif;
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  color: var(--gold);
+  min-height: 18px;
+}
+#info-panel {
+  width: var(--board-size);
+  min-height: 64px;
+  background: linear-gradient(135deg,#140e05,#0d0a07);
+  border: 1px solid #3a2510;
+  border-radius: 4px;
+  padding: 8px 14px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+#info-title { font-family:'Cinzel',serif; font-weight:700; font-size:0.85rem; color:var(--gold-bright); }
+#info-desc  { font-style:italic; font-size:0.82rem; color:#b09060; line-height:1.4; }
+#info-rules { font-size:0.74rem; color:#806840; margin-top:1px; }
+
+/* Game Over */
+#game-over {
+  display:none; position:fixed; inset:0;
+  background:rgba(5,3,1,0.93); z-index:100;
+  flex-direction:column; align-items:center; justify-content:center;
+  gap:20px; padding:30px;
+}
+#game-over.show { display:flex; }
+#go-title {
+  font-family:'Cinzel',serif; font-weight:900;
+  font-size:clamp(1.8rem,7vw,2.8rem); text-align:center;
+  background:linear-gradient(180deg,#f0cc7a,#8b6914);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
+}
+#go-sub { font-style:italic; font-size:1rem; color:var(--parchment); text-align:center; }
+.go-btn {
+  font-family:'Cinzel',serif; font-size:0.85rem; letter-spacing:0.1em;
+  padding:11px 28px;
+  background:linear-gradient(180deg,#3a2510,#1a0f05);
+  border:1px solid var(--gold); border-radius:3px;
+  color:var(--gold-bright); cursor:pointer; transition:all 0.2s;
+}
+.go-btn:active { transform:scale(0.97); }
+
+/* Promotion Modal */
+#promo-modal {
+  display:none; position:fixed; inset:0;
+  background:rgba(5,3,1,0.93); z-index:90;
+  flex-direction:column; align-items:center; justify-content:center;
+  gap:14px; padding:30px;
+}
+#promo-modal.show { display:flex; }
+#promo-title { font-family:'Cinzel',serif; font-weight:700; font-size:1.1rem; color:var(--gold-bright); text-align:center; }
+#promo-choices { display:grid; grid-template-columns:repeat(2,106px); gap:10px; }
+.promo-btn {
+  display:flex; flex-direction:column; align-items:center; gap:5px;
+  padding:8px; background:#140e05; border:1px solid #3a2510; border-radius:4px; cursor:pointer;
+  transition:all 0.2s;
+}
+.promo-btn:active { border-color:var(--gold); background:#1e1608; }
+.promo-btn svg { width:48px; height:48px; }
+.promo-btn span { font-family:'Cinzel',serif; font-size:0.65rem; color:var(--gold); letter-spacing:0.05em; }
+</style>
+</head>
+<body>
+
+<!-- ══════════════ MODE SELECT ══════════════ -->
+<div id="mode-screen">
+  <h1>Hero's Gambit</h1>
+  <div class="tagline">Hunt the Hero. Claim the Realm.</div>
+
+  <div class="mode-divider">— Choose Your Battle —</div>
+
+  <button class="mode-btn" id="btn-1p" onclick="selectMode(1)">
+    1 Player
+    <span class="sub">vs the Crimson Host AI</span>
+  </button>
+  <button class="mode-btn" id="btn-2p" onclick="selectMode(2)">
+    2 Players
+    <span class="sub">local pass-and-play</span>
+  </button>
+  <button class="mode-btn" id="btn-online" onclick="selectMode('online')">
+    Online
+    <span class="sub">invite a friend via link</span>
+  </button>
+
+  <div id="online-lobby">
+    <div class="lobby-label">— Connect via PeerJS —</div>
+    <button class="lobby-btn" id="host-btn" onclick="hostGame()">⚔ Host a Game</button>
+    <button class="lobby-btn" id="show-join-btn" onclick="showJoinRow()">🔗 Join with Code</button>
+    <div id="invite-box">
+      <div class="lobby-label">Share this invite link:</div>
+      <div id="invite-link" onclick="copyInvite()">generating…</div>
+      <button id="copy-btn" onclick="copyInvite()">Copy Link</button>
+    </div>
+    <div id="join-row">
+      <input id="join-input" placeholder="Paste room code or link" maxlength="200"/>
+      <button class="lobby-btn" onclick="joinGame()">Connect to Host</button>
+    </div>
+    <div id="lobby-status"></div>
+  </div>
+
+  <div id="diff-row">
+    <div class="diff-label">— AI Difficulty —</div>
+    <div id="diff-btns">
+      <button class="diff-btn" id="d-squire"  onclick="selectDiff('squire')">Squire</button>
+      <button class="diff-btn" id="d-knight"  onclick="selectDiff('knight')">Knight</button>
+      <button class="diff-btn" id="d-warlord" onclick="selectDiff('warlord')">Warlord</button>
+    </div>
+  </div>
+
+  <button id="start-btn" onclick="startGame()">Enter the Realm</button>
+</div>
+
+<!-- ══════════════ GAME SCREEN ══════════════ -->
+<div id="game-screen">
+  <div id="title-bar">
+    <h1>Hero's Gambit</h1>
+    <button id="menu-btn" onclick="returnToMenu()">⚔ Menu</button>
+  </div>
+
+  <div class="player-bar p2" id="bar2">
+    <div>
+      <div class="p-label" id="bar2-label">PLAYER 2</div>
+      <div class="p-name" id="bar2-name">The Crimson Host</div>
+    </div>
+    <div class="turn-gem"></div>
+  </div>
+
+  <div id="table-wrap">
+    <div id="board-frame">
+      <span class="rune-bl">✦</span>
+      <span class="rune-br">✦</span>
+      <div id="board"></div>
+      <div id="ai-thinking"><span>The Crimson Host schemes…</span></div>
+    </div>
+  </div>
+
+  <div class="player-bar p1 active-bar" id="bar1">
+    <div class="turn-gem"></div>
+    <div style="text-align:right">
+      <div class="p-label">PLAYER 1</div>
+      <div class="p-name">The Sapphire Order</div>
+    </div>
+  </div>
+
+  <div id="status-banner">Select a piece to begin your turn.</div>
+
+  <div id="info-panel">
+    <div id="info-title">Hero's Gambit</div>
+    <div id="info-desc">Tap a piece to see its role and abilities. Capture the enemy Hero to win.</div>
+    <div id="info-rules"></div>
+  </div>
+</div>
+
+<!-- Game Over -->
+<div id="game-over">
+  <div id="go-title"></div>
+  <div id="go-sub"></div>
+  <button class="go-btn" onclick="playAgain()">Play Again</button>
+  <button class="go-btn" onclick="returnToMenu()" style="border-color:#5a3a10;color:#a08850;">Main Menu</button>
+</div>
+
+<!-- Promotion -->
+<div id="promo-modal">
+  <div id="promo-title">⚔ Soldier Promoted!<br>Choose a Class</div>
+  <div id="promo-choices"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  PIECE DATA
+// ═══════════════════════════════════════════════════════
+const PIECES = {
+  soldier:  { name:'Soldier',   desc:'Advances forward or sideways. Attacks diagonally forward. Promotes at the far rank.', rules:'Move: forward or sideways 1 sq | Attack: diagonal forward' },
+  berserker:{ name:'Berserker', desc:'Dominates straight corridors. Moves one square but strikes the full rank or file.', rules:'Move: orthogonal 1 sq | Attack: full rank/file' },
+  ranger:   { name:'Ranger',    desc:'Swift and silent. Moves one square diagonally, attacks the full diagonal.', rules:'Move: diagonal 1 sq | Attack: full diagonal' },
+  rogue:    { name:'Rogue',     desc:'Leaps in an L-shape, cloaked and unstoppable. The only piece that jumps.', rules:'Move: L-jump (leaps pieces) | Attack: on landing square' },
+  wizard:   { name:'Wizard',    desc:'Projects arcane force across every axis. Moves cautiously but strikes anywhere.', rules:'Move: any direction 1 sq | Attack: full queen range' },
+  hero:     { name:'Hero',      desc:'The Chosen One. Unleashes a nova strike — clearing every adjacent square at once. If captured, the game is lost.', rules:'Move: any direction 1 sq | Attack: ALL adjacent squares simultaneously' },
+};
+
+// ═══════════════════════════════════════════════════════
+//  SVG PIECE RENDERER
+// ═══════════════════════════════════════════════════════
+function pieceSVG(type, player) {
+  const c1  = player===1 ? '#4a9fd4' : '#e05050';
+  const c2  = player===1 ? '#1a3a5c' : '#5c1a1a';
+  const c3  = player===1 ? '#2a6090' : '#a03030';
+  const rim = player===1 ? '#6abce8' : '#f08080';
+  const uid = `${type}${player}`;
+
+  const glyphs = {
+    soldier:`
+      <line x1="30" y1="14" x2="30" y2="42" stroke="${c1}" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="22" y1="20" x2="38" y2="20" stroke="${c1}" stroke-width="2.5" stroke-linecap="round"/>
+      <polygon points="30,10 25,20 35,20" fill="${c1}" opacity="0.9"/>
+      <line x1="25" y1="32" x2="35" y2="32" stroke="${c1}" stroke-width="1.5" stroke-linecap="round"/>`,
+    berserker:`
+      <path d="M20,38 L30,14 L40,38" stroke="${c1}" stroke-width="2.5" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+      <line x1="22" y1="32" x2="38" y2="32" stroke="${c1}" stroke-width="2"/>
+      <circle cx="30" cy="14" r="3" fill="${c1}"/>
+      <line x1="17" y1="38" x2="43" y2="38" stroke="${c1}" stroke-width="3" stroke-linecap="round"/>`,
+    ranger:`
+      <path d="M18,36 Q30,10 42,36" stroke="${c1}" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      <line x1="18" y1="36" x2="42" y2="36" stroke="${c1}" stroke-width="2" stroke-linecap="round"/>
+      <line x1="30" y1="14" x2="30" y2="42" stroke="${c1}" stroke-width="1.5" stroke-linecap="round"/>
+      <polygon points="30,10 28,17 32,17" fill="${c1}"/>`,
+    rogue:`
+      <path d="M22,38 L28,20 L22,14 L30,18 L38,14 L32,20 L38,38" stroke="${c1}" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="30" cy="30" r="4" fill="${c1}" opacity="0.7"/>
+      <line x1="22" y1="38" x2="38" y2="38" stroke="${c1}" stroke-width="2.5" stroke-linecap="round"/>`,
+    wizard:`
+      <polygon points="30,11 33,22 44,22 35,29 38,40 30,33 22,40 25,29 16,22 27,22" fill="${c1}" opacity="0.85"/>
+      <circle cx="30" cy="30" r="5" fill="${c2}" stroke="${c1}" stroke-width="1.5"/>`,
+    hero:`
+      <polygon points="30,10 34,22 47,22 37,30 40,43 30,35 20,43 23,30 13,22 26,22" fill="${c1}" opacity="0.95"/>
+      <circle cx="30" cy="28" r="4" fill="${c2}"/>
+      <circle cx="30" cy="10" r="3" fill="${rim}"/>`,
+  };
+
+  return `<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="bg${uid}" cx="40%" cy="30%">
+        <stop offset="0%" stop-color="${c3}"/>
+        <stop offset="100%" stop-color="${c2}"/>
+      </radialGradient>
+    </defs>
+    <ellipse cx="30" cy="56" rx="20" ry="4" fill="rgba(0,0,0,0.5)"/>
+    <ellipse cx="30" cy="48" rx="20" ry="6" fill="${c2}"/>
+    <ellipse cx="30" cy="47" rx="20" ry="6" fill="${c3}"/>
+    <circle cx="30" cy="30" r="22" fill="url(#bg${uid})"/>
+    <circle cx="30" cy="30" r="22" fill="none" stroke="${rim}" stroke-width="1.5" opacity="0.6"/>
+    ${glyphs[type]||glyphs.soldier}
+    <ellipse cx="24" cy="22" rx="7" ry="4" fill="rgba(255,255,255,0.12)" transform="rotate(-15,24,22)"/>
+  </svg>`;
+}
+
+// ═══════════════════════════════════════════════════════
+//  MODE / DIFFICULTY STATE
+// ═══════════════════════════════════════════════════════
+let gameMode = null;   // 1 or 2
+let difficulty = null; // 'squire' | 'knight' | 'warlord'
+
+function selectMode(m) {
+  gameMode = m;
+  document.getElementById('btn-1p').classList.toggle('sel', m===1);
+  document.getElementById('btn-2p').classList.toggle('sel', m===2);
+  document.getElementById('btn-online').classList.toggle('sel', m==='online');
+  const dr  = document.getElementById('diff-row');
+  const ol  = document.getElementById('online-lobby');
+  const sb  = document.getElementById('start-btn');
+  dr.classList.remove('show');
+  ol.classList.remove('show');
+  sb.classList.remove('show');
+  // Reset lobby sub-panels
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.remove('show');
+  if(m===1) {
+    dr.classList.add('show');
+    if(!difficulty) selectDiff('knight');
+  } else if(m==='online') {
+    ol.classList.add('show');
+    onlineRole = null;
+    if(peer) { peer.destroy(); peer=null; conn=null; }
+  } else {
+    difficulty = null;
+    sb.classList.add('show');
+  }
+}
+
+function selectDiff(d) {
+  difficulty = d;
+  ['squire','knight','warlord'].forEach(x =>
+    document.getElementById('d-'+x).classList.toggle('sel', x===d));
+  document.getElementById('start-btn').classList.add('show');
+}
+
+function startGame() {
+  document.getElementById('mode-screen').style.display = 'none';
+  document.getElementById('game-screen').classList.add('show');
+  if(gameMode===1) {
+    document.getElementById('bar2-label').textContent = 'AI · '+difficulty.toUpperCase();
+    document.getElementById('bar2-name').textContent  = 'The Crimson Host';
+  } else {
+    document.getElementById('bar2-label').textContent = 'PLAYER 2';
+    document.getElementById('bar2-name').textContent  = 'The Crimson Host';
+  }
+  resetGame();
+}
+
+function returnToMenu() {
+  document.getElementById('game-over').classList.remove('show');
+  document.getElementById('game-screen').classList.remove('show');
+  document.getElementById('mode-screen').style.display = 'flex';
+}
+
+function playAgain() {
+  document.getElementById('game-over').classList.remove('show');
+  resetGame();
+}
+
+// ═══════════════════════════════════════════════════════
+//  GAME STATE
+// ═══════════════════════════════════════════════════════
+let board = [];
+let currentPlayer = 1;
+let selected = null;
+let validMoves = [];
+let validAttacks = [];
+let promoSquare = null;
+let aiLock = false;
+
+function initBoard() {
+  const p2Back = ['berserker','rogue','ranger','wizard','hero','ranger','rogue','berserker'];
+  const p1Back = ['berserker','rogue','ranger','hero','wizard','ranger','rogue','berserker'];
+  board = Array.from({length:8}, ()=>Array(8).fill(null));
+  p2Back.forEach((t,c) => board[0][c] = {type:t, player:2});
+  for(let c=0;c<8;c++) board[1][c] = {type:'soldier', player:2};
+  for(let c=0;c<8;c++) board[6][c] = {type:'soldier', player:1};
+  p1Back.forEach((t,c) => board[7][c] = {type:t, player:1});
+}
+
+// ═══════════════════════════════════════════════════════
+//  MOVE / ATTACK LOGIC
+// ═══════════════════════════════════════════════════════
+function inBounds(r,c){ return r>=0&&r<8&&c>=0&&c<8; }
+
+function getMovesAndAttacks(r, c, brd) {
+  brd = brd || board;
+  const piece = brd[r][c];
+  if(!piece) return {moves:[], attacks:[]};
+  const {type, player} = piece;
+  const dir = player===1 ? -1 : 1;
+  let moves=[], attacks=[];
+
+  if(type==='soldier') {
+    [[r+dir,c],[r,c-1],[r,c+1]].forEach(([nr,nc])=>{
+      if(inBounds(nr,nc)&&!brd[nr][nc]) moves.push([nr,nc]);
+    });
+    [[r+dir,c-1],[r+dir,c+1]].forEach(([nr,nc])=>{
+      if(inBounds(nr,nc)&&brd[nr][nc]&&brd[nr][nc].player!==player) attacks.push([nr,nc]);
+    });
+  }
+  else if(type==='berserker') {
+    [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dr,dc])=>{
+      const nr=r+dr,nc=c+dc;
+      if(inBounds(nr,nc)&&!brd[nr][nc]) moves.push([nr,nc]);
+    });
+    [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dr,dc])=>{
+      for(let i=1;i<8;i++){
+        const nr=r+dr*i,nc=c+dc*i;
+        if(!inBounds(nr,nc)) break;
+        if(brd[nr][nc]){ if(brd[nr][nc].player!==player) attacks.push([nr,nc]); break; }
+      }
+    });
+  }
+  else if(type==='ranger') {
+    [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(([dr,dc])=>{
+      const nr=r+dr,nc=c+dc;
+      if(inBounds(nr,nc)&&!brd[nr][nc]) moves.push([nr,nc]);
+    });
+    [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(([dr,dc])=>{
+      for(let i=1;i<8;i++){
+        const nr=r+dr*i,nc=c+dc*i;
+        if(!inBounds(nr,nc)) break;
+        if(brd[nr][nc]){ if(brd[nr][nc].player!==player) attacks.push([nr,nc]); break; }
+      }
+    });
+  }
+  else if(type==='rogue') {
+    // Rogue ONLY attacks by landing — all L-squares are treated as moves.
+    // If occupied by an enemy, it is a capture-move (not a ranged attack).
+    // This is enforced in executeMove which checks for capture on landing.
+    [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]].forEach(([dr,dc])=>{
+      const nr=r+dr,nc=c+dc;
+      if(!inBounds(nr,nc)) return;
+      if(!brd[nr][nc]) moves.push([nr,nc]);
+      else if(brd[nr][nc].player!==player) moves.push([nr,nc]); // capture-move
+    });
+  }
+  else if(type==='wizard') {
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      const nr=r+dr,nc=c+dc;
+      if(inBounds(nr,nc)&&!brd[nr][nc]) moves.push([nr,nc]);
+    }
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      for(let i=1;i<8;i++){
+        const nr=r+dr*i,nc=c+dc*i;
+        if(!inBounds(nr,nc)) break;
+        if(brd[nr][nc]){ if(brd[nr][nc].player!==player) attacks.push([nr,nc]); break; }
+      }
+    }
+  }
+  else if(type==='hero') {
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      const nr=r+dr,nc=c+dc;
+      if(inBounds(nr,nc)&&!brd[nr][nc]) moves.push([nr,nc]);
+    }
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      const nr=r+dr,nc=c+dc;
+      if(inBounds(nr,nc)&&brd[nr][nc]&&brd[nr][nc].player!==player) attacks.push([nr,nc]);
+    }
+  }
+  return {moves, attacks};
+}
+
+// All legal actions for a player on a given board: [{from,to,isAttack}]
+function getAllActions(player, brd) {
+  brd = brd || board;
+  const actions = [];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = brd[r][c];
+    if(!p || p.player!==player) continue;
+    const {moves,attacks} = getMovesAndAttacks(r,c,brd);
+    moves.forEach(([tr,tc])   => actions.push({fr:r,fc:c,tr,tc,isAttack:false}));
+    attacks.forEach(([tr,tc]) => actions.push({fr:r,fc:c,tr,tc,isAttack:true}));
+  }
+  return actions;
+}
+
+// Apply an action to a board copy; returns {newBoard, gameOver, winner}
+function applyAction(action, brd) {
+  const nb = brd.map(row=>row.map(p=>p?{...p}:null));
+  const {fr,fc,tr,tc,isAttack} = action;
+  const piece = nb[fr][fc];
+
+  if(!isAttack) {
+    const landTarget = nb[tr][tc];
+    nb[tr][tc] = piece;
+    nb[fr][fc] = null;
+    // Rogue capture-move: landing on enemy hero ends game
+    if(piece.type==='rogue' && landTarget && landTarget.player !== piece.player) {
+      if(landTarget.type==='hero') return {newBoard:nb, gameOver:true, winner:piece.player};
+    }
+    // auto-promote to wizard for AI simulation
+    if(piece.type==='soldier'){
+      const back = piece.player===1?0:7;
+      if(tr===back) nb[tr][tc] = {type:'wizard', player:piece.player};
+    }
+    return {newBoard:nb, gameOver:false, winner:null};
+  }
+
+  // Attack
+  if(piece.type==='hero') {
+    let heroKilled = false;
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      const nr=fr+dr,nc=fc+dc;
+      if(!inBounds(nr,nc)) continue;
+      const t=nb[nr][nc];
+      if(t&&t.player!==piece.player){
+        if(t.type==='hero') heroKilled=true;
+        nb[nr][nc]=null;
+      }
+    }
+    if(heroKilled) return {newBoard:nb, gameOver:true, winner:piece.player};
+  } else {
+    const target = nb[tr][tc];
+    if(target&&target.type==='hero'){
+      nb[tr][tc]=null;
+      return {newBoard:nb, gameOver:true, winner:piece.player};
+    }
+    nb[tr][tc]=null;
+  }
+  return {newBoard:nb, gameOver:false, winner:null};
+}
+
+// ═══════════════════════════════════════════════════════
+//  AI — MINIMAX WITH ALPHA-BETA
+// ═══════════════════════════════════════════════════════
+const PIECE_VAL = { soldier:1, ranger:3, berserker:3, rogue:4, wizard:9, hero:100 };
+
+function evaluate(brd) {
+  let score = 0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = brd[r][c];
+    if(!p) continue;
+    const v = PIECE_VAL[p.type] || 0;
+    // Positional: advance soldiers, centralize pieces
+    let pos = 0;
+    if(p.type==='soldier') pos = p.player===2 ? r*0.1 : (7-r)*0.1;
+    else pos = (3.5 - Math.abs(r-3.5) + 3.5 - Math.abs(c-3.5)) * 0.05;
+    score += p.player===2 ? (v+pos) : -(v+pos);
+  }
+  return score;
+}
+
+function minimax(brd, depth, alpha, beta, maximizing) {
+  const player = maximizing ? 2 : 1;
+  const actions = getAllActions(player, brd);
+
+  if(depth===0 || actions.length===0) return {score: evaluate(brd), action:null};
+
+  // Prioritise attacks (move ordering)
+  actions.sort((a,b) => b.isAttack - a.isAttack);
+
+  let best = null;
+  if(maximizing) {
+    let maxScore = -Infinity;
+    for(const action of actions){
+      const {newBoard, gameOver, winner} = applyAction(action, brd);
+      let score;
+      if(gameOver) { score = winner===2 ? 9999 : -9999; }
+      else { score = minimax(newBoard, depth-1, alpha, beta, false).score; }
+      if(score > maxScore){ maxScore=score; best=action; }
+      alpha = Math.max(alpha, score);
+      if(beta <= alpha) break;
+    }
+    return {score:maxScore, action:best};
+  } else {
+    let minScore = Infinity;
+    for(const action of actions){
+      const {newBoard, gameOver, winner} = applyAction(action, brd);
+      let score;
+      if(gameOver) { score = winner===2 ? 9999 : -9999; }
+      else { score = minimax(newBoard, depth-1, alpha, beta, true).score; }
+      if(score < minScore){ minScore=score; best=action; }
+      beta = Math.min(beta, score);
+      if(beta <= alpha) break;
+    }
+    return {score:minScore, action:best};
+  }
+}
+
+const DIFF_DEPTH = { squire:1, knight:2, warlord:3 };
+
+function aiTakeTurn() {
+  if(aiLock) return;
+  aiLock = true;
+  document.getElementById('ai-thinking').classList.add('show');
+  setStatus('The Crimson Host schemes…');
+
+  setTimeout(() => {
+    const depth = DIFF_DEPTH[difficulty] || 2;
+    const result = minimax(board, depth, -Infinity, Infinity, true);
+
+    document.getElementById('ai-thinking').classList.remove('show');
+    aiLock = false;
+
+    if(!result.action) { endTurn(); return; }
+
+    const {fr,fc,tr,tc,isAttack} = result.action;
+    if(isAttack) {
+      executeAttack(fr,fc,tr,tc);
+    } else {
+      executeMove(fr,fc,tr,tc,true); // true = ai (skip promo modal, auto-promote)
+    }
+  }, 120);
+}
+
+// ═══════════════════════════════════════════════════════
+//  RENDER
+// ═══════════════════════════════════════════════════════
+function render() {
+  const boardEl = document.getElementById('board');
+  boardEl.innerHTML = '';
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const light = (r+c)%2===0;
+    const sq = document.createElement('div');
+    sq.className = `sq ${light?'light':'dark'}`;
+    if(selected&&selected[0]===r&&selected[1]===c) sq.classList.add('selected');
+    if(validMoves.some(([mr,mc])=>mr===r&&mc===c))   sq.classList.add('can-move');
+    if(validAttacks.some(([ar,ac])=>ar===r&&ac===c)) sq.classList.add('can-attack');
+
+    const piece = board[r][c];
+    if(piece){
+      const pd = document.createElement('div');
+      pd.className = 'piece';
+      pd.innerHTML = pieceSVG(piece.type, piece.player);
+      sq.appendChild(pd);
+    }
+    sq.addEventListener('click', ()=>handleClick(r,c));
+    boardEl.appendChild(sq);
+  }
+  document.getElementById('bar1').classList.toggle('active-bar', currentPlayer===1);
+  document.getElementById('bar2').classList.toggle('active-bar', currentPlayer===2);
+}
+
+// ═══════════════════════════════════════════════════════
+//  INTERACTION
+// ═══════════════════════════════════════════════════════
+function handleClick(r,c) {
+  if(aiLock) return;
+  if(gameMode===1 && currentPlayer===2) return; // AI's turn
+  if(gameMode==='online') {
+    const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                   (onlineRole==='guest' && currentPlayer===2);
+    if(!myTurn) return;
+  }
+
+  const piece = board[r][c];
+
+  if(selected&&validAttacks.some(([ar,ac])=>ar===r&&ac===c)){
+    executeAttack(selected[0],selected[1],r,c); return;
+  }
+  if(selected&&validMoves.some(([mr,mc])=>mr===r&&mc===c)){
+    executeMove(selected[0],selected[1],r,c,false); return;
+  }
+  if(piece&&piece.player===currentPlayer){
+    selected=[r,c];
+    const {moves,attacks}=getMovesAndAttacks(r,c);
+    validMoves=moves; validAttacks=attacks;
+    showPieceInfo(piece.type); render(); return;
+  }
+  selected=null; validMoves=[]; validAttacks=[]; render();
+}
+
+function executeMove(fr,fc,tr,tc,isAI) {
+  const moving = board[fr][fc];
+  const target = board[tr][tc];
+
+  // Rogue capture-move: landing on an enemy is a capture, not a ranged attack
+  if(moving.type==='rogue' && target && target.player !== moving.player) {
+    const isHero = target.type==='hero';
+    board[tr][tc] = moving;
+    board[fr][fc] = null;
+    selected=null; validMoves=[]; validAttacks=[];
+    if(isHero){ endGame(moving.player); return; }
+    endTurn(); return;
+  }
+
+  board[tr][tc]=board[fr][fc];
+  board[fr][fc]=null;
+  selected=null; validMoves=[]; validAttacks=[];
+
+  const piece=board[tr][tc];
+  if(piece.type==='soldier'){
+    const back=piece.player===1?0:7;
+    if(tr===back){
+      if(isAI){
+        board[tr][tc]={type:'wizard',player:piece.player};
+        endTurn();
+      } else {
+        promoSquare=[tr,tc];
+        render();
+        showPromoModal(piece.player);
+      }
+      return;
+    }
+  }
+  endTurn();
+}
+
+function executeAttack(fr,fc,tr,tc) {
+  const attacker=board[fr][fc];
+  if(attacker.type==='hero'){
+    let heroKilled=false;
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      const nr=fr+dr,nc=fc+dc;
+      if(!inBounds(nr,nc)) continue;
+      const t=board[nr][nc];
+      if(t&&t.player!==attacker.player){
+        if(t.type==='hero') heroKilled=true;
+        board[nr][nc]=null;
+      }
+    }
+    selected=null; validMoves=[]; validAttacks=[];
+    if(heroKilled){ endGame(attacker.player); return; }
+  } else {
+    const target=board[tr][tc];
+    const isHero=target&&target.type==='hero';
+    board[tr][tc]=null;
+    selected=null; validMoves=[]; validAttacks=[];
+    if(isHero){ endGame(attacker.player); return; }
+  }
+  endTurn();
+}
+
+function endTurn() {
+  currentPlayer=currentPlayer===1?2:1;
+  const names={1:'The Sapphire Order',2:'The Crimson Host'};
+  clearInfo(); render();
+  if(gameMode==='online') {
+    sendState();
+    const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                   (onlineRole==='guest' && currentPlayer===2);
+    setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+  } else {
+    setStatus(`${names[currentPlayer]}'s turn.`);
+    if(gameMode===1&&currentPlayer===2) setTimeout(aiTakeTurn, 300);
+  }
+}
+
+function endGame(winner) {
+  render();
+  const names={1:'The Sapphire Order',2:'The Crimson Host'};
+  document.getElementById('go-title').textContent=`${names[winner]} Prevails!`;
+  document.getElementById('go-sub').textContent='The enemy Hero has fallen. The realm is yours.';
+  document.getElementById('game-over').classList.add('show');
+  if(gameMode==='online' && conn && conn.open) {
+    conn.send({type:'gameover', winner});
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  PROMOTION
+// ═══════════════════════════════════════════════════════
+function showPromoModal(player){
+  const ch=document.getElementById('promo-choices');
+  ch.innerHTML='';
+  ['berserker','ranger','rogue','wizard'].forEach(type=>{
+    const btn=document.createElement('div');
+    btn.className='promo-btn';
+    btn.innerHTML=`${pieceSVG(type,player)}<span>${PIECES[type].name}</span>`;
+    btn.addEventListener('click',()=>promoPick(type,player));
+    ch.appendChild(btn);
+  });
+  document.getElementById('promo-modal').classList.add('show');
+}
+function promoPick(type,player){
+  if(promoSquare){ const[r,c]=promoSquare; board[r][c]={type,player}; promoSquare=null; }
+  document.getElementById('promo-modal').classList.remove('show');
+  endTurn();
+}
+
+// ═══════════════════════════════════════════════════════
+//  INFO / STATUS
+// ═══════════════════════════════════════════════════════
+function showPieceInfo(type){
+  const p=PIECES[type];
+  document.getElementById('info-title').textContent=p.name;
+  document.getElementById('info-desc').textContent=p.desc;
+  document.getElementById('info-rules').textContent=p.rules;
+}
+function clearInfo(){
+  document.getElementById('info-title').textContent="Hero's Gambit";
+  document.getElementById('info-desc').textContent='Tap a piece to see its role and abilities. Capture the enemy Hero to win.';
+  document.getElementById('info-rules').textContent='';
+}
+function setStatus(msg){ document.getElementById('status-banner').textContent=msg; }
+
+// ═══════════════════════════════════════════════════════
+//  RESET
+// ═══════════════════════════════════════════════════════
+function resetGame(){
+  currentPlayer=1; selected=null; validMoves=[]; validAttacks=[]; promoSquare=null; aiLock=false;
+  document.getElementById('ai-thinking').classList.remove('show');
+  initBoard(); clearInfo(); setStatus('Select a piece to begin your turn.'); render();
+}
+
+// ═══════════════════════════════════════════════════════
+//  ONLINE MODE — PeerJS
+// ═══════════════════════════════════════════════════════
+let peer = null;
+let conn = null;
+let onlineRole = null; // 'host' | 'guest'
+
+function lobbyStatus(msg, color) {
+  const el = document.getElementById('lobby-status');
+  if(el){ el.textContent = msg; el.style.color = color || '#806840'; }
+}
+
+function hostGame() {
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.remove('show');
+  lobbyStatus('Connecting to PeerJS server…');
+  if(peer) peer.destroy();
+  peer = new Peer();
+  peer.on('open', id => {
+    onlineRole = 'host';
+    const url = `${location.origin}${location.pathname}#${id}`;
+    document.getElementById('invite-link').textContent = url;
+    document.getElementById('invite-box').classList.add('show');
+    lobbyStatus('Waiting for your opponent to join…', '#4a9fd4');
+  });
+  peer.on('connection', c => {
+    conn = c;
+    setupConn();
+    lobbyStatus('Opponent connected! Starting…', '#6abce8');
+    setTimeout(() => {
+      gameMode = 'online';
+      startGame();
+      sendState();
+    }, 600);
+  });
+  peer.on('error', e => lobbyStatus('Connection error: ' + e.type, '#e05050'));
+}
+
+function showJoinRow() {
+  document.getElementById('invite-box').classList.remove('show');
+  document.getElementById('join-row').classList.add('show');
+  // Auto-fill if URL has a hash
+  const hash = location.hash.replace('#','');
+  if(hash) {
+    // Could be full URL or just ID
+    const id = hash.includes('#') ? hash.split('#').pop() : hash;
+    document.getElementById('join-input').value = id;
+  }
+}
+
+function joinGame() {
+  let raw = document.getElementById('join-input').value.trim();
+  // Accept full URL or bare peer ID
+  if(raw.includes('#')) raw = raw.split('#').pop();
+  if(!raw){ lobbyStatus('Enter a room code or invite link.', '#e05050'); return; }
+  lobbyStatus('Connecting to host…');
+  if(peer) peer.destroy();
+  peer = new Peer();
+  peer.on('open', () => {
+    conn = peer.connect(raw, {reliable:true});
+    setupConn();
+  });
+  peer.on('error', e => lobbyStatus('Could not connect: ' + e.type, '#e05050'));
+}
+
+function setupConn() {
+  conn.on('open', () => {
+    if(!onlineRole) {
+      onlineRole = 'guest';
+      lobbyStatus('Connected! Waiting for host to start…', '#4a9fd4');
+    }
+  });
+  conn.on('data', data => {
+    if(data.type === 'state') {
+      board = data.board;
+      currentPlayer = data.currentPlayer;
+      selected=null; validMoves=[]; validAttacks=[];
+      render();
+      const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                     (onlineRole==='guest' && currentPlayer===2);
+      setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+      if(data.started && gameMode !== 'online') {
+        gameMode = 'online';
+        document.getElementById('mode-screen').style.display = 'none';
+        document.getElementById('game-screen').classList.add('show');
+        resetOnline(data.board, data.currentPlayer);
+      }
+    }
+    if(data.type === 'gameover') {
+      endGame(data.winner);
+    }
+  });
+  conn.on('close', () => setStatus('Opponent disconnected.'));
+}
+
+function sendState(extra) {
+  if(!conn || !conn.open) return;
+  conn.send({ type:'state', board, currentPlayer, started:true, ...extra });
+}
+
+function resetOnline(brd, cp) {
+  if(brd) board = brd;
+  currentPlayer = cp || 1;
+  selected=null; validMoves=[]; validAttacks=[]; promoSquare=null; aiLock=false;
+  document.getElementById('ai-thinking').classList.remove('show');
+  if(!brd) initBoard();
+  clearInfo();
+  const myTurn = (onlineRole==='host' && currentPlayer===1) ||
+                 (onlineRole==='guest' && currentPlayer===2);
+  setStatus(myTurn ? 'Your turn.' : "Opponent's turn…");
+  // Guest is P2 (Crimson Host), Host is P1
+  if(onlineRole==='guest') {
+    document.getElementById('bar2-label').textContent = 'YOU';
+    document.getElementById('bar1').querySelector('.p-label').textContent = 'OPPONENT';
+  }
+  render();
+}
+
+function copyInvite() {
+  const txt = document.getElementById('invite-link').textContent;
+  navigator.clipboard.writeText(txt).then(()=>{
+    document.getElementById('copy-btn').textContent = 'Copied!';
+    setTimeout(()=> document.getElementById('copy-btn').textContent = 'Copy Link', 2000);
+  });
+}
+
+// Auto-join if URL has a peer hash
+window.addEventListener('load', () => {
+  const hash = location.hash.replace('#','');
+  if(hash && !hash.includes('/')) {
+    selectMode('online');
+    document.getElementById('join-input') && (document.getElementById('join-input').value = hash);
+    showJoinRow();
+  }
+});
+
+</script>
+</body>
+</html>
